@@ -1,0 +1,55 @@
+name: JWT Integration Tests
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'litellm/proxy/custom_jwt_auth.py'
+      - 'tests/integration/test_jwt_integration.py'
+      - 'config_jwt_example.yaml'
+      - '.github/workflows/test-jwt-integration.yml'
+
+jobs:
+  test-jwt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+
+    - name: Install dependencies
+      run: |
+        poetry install --with dev,proxy-dev --extras proxy
+        poetry run pip install "pytest-retry==1.6.3"
+        poetry run pip install pytest-xdist
+        poetry run pip install responses
+
+    - name: Setup litellm-enterprise as local package
+      run: |
+        cd enterprise
+        python -m pip install -e .
+        cd ..
+
+    - name: Run JWT Integration Tests
+      run: |
+        poetry run pytest tests/integration/test_jwt_integration.py -v
+
+    - name: Run JWT Unit Tests (proxy_unit_tests)
+      run: |
+        poetry run pytest tests/proxy_unit_tests/test_custom_jwt_auth.py -v
+
+    - name: Verify JWT Configuration Loading
+      run: |
+        poetry run python -c "
+        from litellm.proxy.custom_jwt_auth import JWTConfig
+        config = JWTConfig({'issuer': 'test', 'audience': 'test', 'public_key_url': 'https://test.com'})
+        print('✅ JWT configuration loads successfully')
+        " 

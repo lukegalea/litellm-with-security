@@ -148,3 +148,16 @@ version_files = [
 
 [tool.mypy]
 plugins = "pydantic.mypy"
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+]
+markers = [
+    "jwt: marks tests as JWT authentication tests",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests"
+]
+asyncio_mode = "auto"

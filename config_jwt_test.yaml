@@ -1,0 +1,49 @@
+model_list:
+  - model_name: gpt-3.5-turbo
+    litellm_params:
+      model: openai/gpt-3.5-turbo
+      api_key: sk-fake-key-for-testing
+
+general_settings:
+  # Use custom JWT authentication
+  custom_auth: custom_jwt_auth.jwt_auth
+  
+  # Test database configuration
+  database_url: "postgresql://llmproxy:dbpassword9090@db:5432/litellm"
+  
+  # JWT provider settings for testing
+  jwt_settings:
+    issuer: "https://mock-jwt-provider.test"
+    audience: "litellm-proxy"
+    public_key_url: "https://mock-jwt-provider.test/.well-known/jwks.json"
+    
+    # User claim mappings
+    user_claim_mappings:
+      user_id: "sub"
+      user_email: "email"
+      user_role: "role"
+      team_id: "team"
+    
+    # Role mapping from JWT claims to LiteLLM roles
+    role_mapping:
+      admin: "PROXY_ADMIN"
+      user: "INTERNAL_USER"
+      viewer: "INTERNAL_USER_VIEW_ONLY"
+    
+    # Cache settings for testing
+    jwks_cache_ttl: 300  # 5 minutes
+    
+    # Allow insecure connections for testing
+    verify_ssl: false
+
+litellm_settings:
+  # Enable logging for cost tracking tests
+  success_callback: ["postgres"]
+  failure_callback: ["postgres"]
+  
+  # Set low rate limits for testing
+  max_budget: 100
+  budget_duration: "monthly"
+  
+  # Enable detailed logging
+  set_verbose: true 

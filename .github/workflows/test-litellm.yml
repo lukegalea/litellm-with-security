@@ -31,11 +31,22 @@ jobs:
         poetry run pip install "pytest-retry==1.6.3"
         poetry run pip install pytest-xdist
         poetry run pip install "google-genai==1.22.0"
+        poetry run pip install responses
+
     - name: Setup litellm-enterprise as local package
       run: |
         cd enterprise
         python -m pip install -e .
         cd ..
-    - name: Run tests
+
+    - name: Run JWT Integration Tests (Quick Check)
+      run: |
+        python test_jwt_simple.py
+
+    - name: Run main LiteLLM tests
       run: |
         poetry run pytest tests/test_litellm -x -vv -n 4 
+
+    - name: Run JWT Integration Tests (Full Suite)
+      run: |
+        poetry run pytest tests/integration/test_jwt_integration.py -v 

@@ -31,6 +31,34 @@ services:
       retries: 3     # Retry up to 3 times if health check fails
       start_period: 40s  # Wait 40 seconds after container start before beginning health checks
 
+  # Service for running tests
+  litellm-test:
+    build:
+      context: .
+      args:
+        target: runtime
+    image: ghcr.io/berriai/litellm:main-stable
+    volumes:
+      - ./:/app/
+      - ./tests:/app/tests
+      - ./config_jwt_test.yaml:/app/config.yaml
+      - ./requirements-test.txt:/app/requirements-test.txt
+    working_dir: /app
+    environment:
+      DATABASE_URL: "postgresql://llmproxy:dbpassword9090@db:5432/litellm"
+      PYTHONPATH: "/app"
+    depends_on:
+      - db
+    profiles:
+      - test
+    # Install test dependencies when container starts
+    command: >
+      bash -c "
+        pip install -r requirements-test.txt &&
+        echo 'Test dependencies installed successfully' &&
+        exec tail -f /dev/null
+      "
+
   db:
     image: postgres:16
     restart: always

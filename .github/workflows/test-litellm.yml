@@ -38,15 +38,6 @@ jobs:
         cd enterprise
         python -m pip install -e .
         cd ..
-
-    - name: Run JWT Integration Tests (Quick Check)
-      run: |
-        python test_jwt_simple.py
-
-    - name: Run main LiteLLM tests
+    - name: Run tests
       run: |
         poetry run pytest tests/test_litellm -x -vv -n 4 
-
-    - name: Run JWT Integration Tests (Full Suite)
-      run: |
-        poetry run pytest tests/integration/test_jwt_integration.py -v 

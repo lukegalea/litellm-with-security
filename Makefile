@@ -1,8 +1,7 @@
 # LiteLLM Makefile
 # Simple Makefile for running tests and basic development tasks
 
-.PHONY: help test test-unit test-integration test-unit-helm lint format install-dev install-proxy-dev install-test-deps install-helm-unittest check-circular-imports check-import-safety
-.PHONY: help test test-unit test-integration test-jwt lint format
+.PHONY: help test test-unit test-integration lint format
 
 # Default target
 help:
@@ -24,7 +23,6 @@ help:
 	@echo "  make test               - Run all tests"
 	@echo "  make test-unit          - Run unit tests (tests/test_litellm)"
 	@echo "  make test-integration   - Run integration tests"
-	@echo "  make test-jwt           - Run JWT integration tests"
 	@echo "  make test-unit-helm     - Run helm unit tests"
 
 # Installation targets

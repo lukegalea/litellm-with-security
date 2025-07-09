@@ -9,7 +9,8 @@ JWT token must have 'litellm_proxy_admin' in scope.
 import fnmatch
 import json
 import os
-from typing import Any, List, Literal, Optional, Set, Tuple, cast
+import re
+from typing import Any, List, Literal, Optional, Set, Tuple, Union, cast
 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -433,85 +434,258 @@ class JWTHandler:
         else:
             return False
 
-    async def auth_jwt(self, token: str) -> dict:
-        # Supported algos: https://pyjwt.readthedocs.io/en/stable/algorithms.html
-        # "Warning: Make sure not to mix symmetric and asymmetric algorithms that interpret
-        #   the key in different ways (e.g. HS* and RS*)."
-        algorithms = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512"]
+    def validate_audience(self, token_audiences: Union[str, List[str]], audience_config: Optional[dict] = None) -> bool:
+        """
+        Validate JWT audience claims against configured validation rules.
+        Supports multi-domain audience validation for enterprise JWT.
+        
+        Args:
+            token_audiences: Audience claim(s) from JWT token
+            audience_config: Optional audience validation configuration
+            
+        Returns:
+            bool: True if audience validation passes
+        """
+        # Normalize token audiences to list
+        if isinstance(token_audiences, str):
+            token_audiences = [token_audiences]
+        
+        # Get audience configuration from environment or config
+        if audience_config is None:
+            # Fallback to simple JWT_AUDIENCE environment variable
+            env_audience = os.getenv("JWT_AUDIENCE")
+            if env_audience is None:
+                # If no audience configured, skip validation
+                return True
+            
+            # Simple validation for backward compatibility
+            return env_audience in token_audiences
+        
+        # Enhanced multi-domain validation
+        mode = audience_config.get("mode", "single")
+        audiences = audience_config.get("audiences", [])
+        domain_patterns = audience_config.get("domain_patterns", [])
+        allowed_domains = audience_config.get("allowed_domains", [])
+        
+        verbose_proxy_logger.debug(f"Enterprise JWT: Validating audiences: {token_audiences} against mode: {mode}")
+        
+        if mode == "single":
+            return self._validate_single_audience(token_audiences, audiences)
+        elif mode == "multiple":
+            return self._validate_multiple_audiences(token_audiences, audiences)
+        elif mode == "domain_patterns":
+            return self._validate_domain_patterns(token_audiences, domain_patterns)
+        elif mode == "flexible":
+            return self._validate_flexible(token_audiences, audiences, domain_patterns, allowed_domains)
+        
+        return False
+    
+    def _validate_single_audience(self, token_audiences: List[str], configured_audiences: List[str]) -> bool:
+        """Validate against a single expected audience"""
+        if len(configured_audiences) != 1:
+            verbose_proxy_logger.error("Single audience mode requires exactly one configured audience")
+            return False
+        
+        expected_audience = configured_audiences[0]
+        return expected_audience in token_audiences
+    
+    def _validate_multiple_audiences(self, token_audiences: List[str], configured_audiences: List[str]) -> bool:
+        """Validate against multiple allowed audiences (JWT spec compliant)"""
+        for token_aud in token_audiences:
+            if token_aud in configured_audiences:
+                verbose_proxy_logger.debug(f"Enterprise JWT: Audience match found: {token_aud}")
+                return True
+        
+        verbose_proxy_logger.warning(f"Enterprise JWT: No audience match found. Token: {token_audiences}, Configured: {configured_audiences}")
+        return False
+    
+    def _validate_domain_patterns(self, token_audiences: List[str], domain_patterns: List[str]) -> bool:
+        """Validate against domain patterns (supports wildcards)"""
+        for token_aud in token_audiences:
+            for pattern in domain_patterns:
+                if self._matches_pattern(token_aud, pattern):
+                    verbose_proxy_logger.debug(f"Enterprise JWT: Audience {token_aud} matches pattern {pattern}")
+                    return True
+        
+        verbose_proxy_logger.warning(f"Enterprise JWT: No pattern match found. Token: {token_audiences}, Patterns: {domain_patterns}")
+        return False
+    
+    def _validate_flexible(self, token_audiences: List[str], audiences: List[str], domain_patterns: List[str], allowed_domains: List[str]) -> bool:
+        """Flexible validation combining multiple strategies"""
+        # Try exact matches first
+        if audiences and self._validate_multiple_audiences(token_audiences, audiences):
+            return True
+        
+        # Try domain patterns
+        if domain_patterns and self._validate_domain_patterns(token_audiences, domain_patterns):
+            return True
+        
+        # Try allowed domains
+        if allowed_domains:
+            for token_aud in token_audiences:
+                domain = self._extract_domain(token_aud)
+                if domain:
+                    for allowed_domain in allowed_domains:
+                        # Check exact match or if domain is a subdomain of allowed domain
+                        if domain == allowed_domain or domain.endswith('.' + allowed_domain):
+                            verbose_proxy_logger.debug(f"Enterprise JWT: Audience domain {domain} matches allowed domain {allowed_domain}")
+                            return True
+        
+        return False
+    
+    def _matches_pattern(self, audience: str, pattern: str) -> bool:
+        """Check if audience matches a pattern (supports wildcards and regex)"""
+        try:
+            # Try fnmatch first (supports *.example.com style patterns)
+            if fnmatch.fnmatch(audience, pattern):
+                return True
+            
+            # Try as regex pattern if fnmatch fails
+            if re.match(pattern, audience):
+                return True
+                
+        except re.error:
+            # If regex is invalid, fall back to exact string match
+            verbose_proxy_logger.warning(f"Enterprise JWT: Invalid regex pattern: {pattern}, falling back to exact match")
+            return audience == pattern
+        
+        return False
+    
+    def _extract_domain(self, audience: str) -> Optional[str]:
+        """Extract domain from audience (handles URLs and plain domains)"""
+        try:
+            # Handle URLs
+            if audience.startswith(('http://', 'https://')):
+                from urllib.parse import urlparse
+                parsed = urlparse(audience)
+                return parsed.netloc
+            
+            # Handle plain domain names - validate they are proper domains
+            if ('.' in audience and 
+                not audience.startswith('.') and 
+                not audience.endswith('.') and
+                '..' not in audience):  # No consecutive dots
+                return audience
+                
+        except Exception as e:
+            verbose_proxy_logger.warning(f"Enterprise JWT: Failed to extract domain from {audience}: {e}")
+        
+        return None
 
+    def _validate_custom_audience(self, payload: dict, audience_config: dict) -> None:
+        """Helper method to validate custom audience configuration"""
+        token_audience = payload.get("aud")
+        if not token_audience:
+            raise Exception("JWT token missing audience claim")
+        
+        if not self.validate_audience(token_audience, audience_config):
+            raise Exception("JWT audience validation failed")
+
+    def _decode_jwt_with_rsa_key(
+        self, 
+        token: str, 
+        public_key_rsa: Any, 
+        algorithms: List[str], 
+        decode_options: Optional[dict], 
+        audience: Optional[str], 
+        use_custom_validation: bool,
+        audience_config: Optional[dict]
+    ) -> dict:
+        """Helper method to decode JWT with RSA public key"""
+        import jwt
+        
+        try:
+            payload = jwt.decode(
+                token,
+                public_key_rsa,
+                algorithms=algorithms,
+                options=decode_options,
+                audience=audience if not use_custom_validation else None,
+                leeway=self.leeway,
+            )
+            
+            if use_custom_validation and audience_config:
+                self._validate_custom_audience(payload, audience_config)
+            
+            return payload
+
+        except jwt.ExpiredSignatureError:
+            raise Exception("Token Expired")
+        except Exception as e:
+            raise Exception(f"Validation fails: {str(e)}")
+
+    def _decode_jwt_with_cert_key(
+        self, 
+        token: str, 
+        cert_key: bytes, 
+        algorithms: List[str], 
+        decode_options: Optional[dict], 
+        audience: Optional[str], 
+        use_custom_validation: bool,
+        audience_config: Optional[dict]
+    ) -> dict:
+        """Helper method to decode JWT with certificate key"""
+        import jwt
+        
+        try:
+            payload = jwt.decode(
+                token,
+                cert_key,
+                algorithms=algorithms,
+                audience=audience if not use_custom_validation else None,
+                options=decode_options,
+            )
+            
+            if use_custom_validation and audience_config:
+                self._validate_custom_audience(payload, audience_config)
+            
+            return payload
+
+        except jwt.ExpiredSignatureError:
+            raise Exception("Token Expired")
+        except Exception as e:
+            raise Exception(f"Validation fails: {str(e)}")
+
+    async def auth_jwt(self, token: str, audience_config: Optional[dict] = None) -> dict:
+        """Main JWT authentication method - refactored for reduced complexity"""
+        algorithms = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512"]
+        use_custom_validation = audience_config is not None
+        
         audience = os.getenv("JWT_AUDIENCE")
-        decode_options = None
-        if audience is None:
-            decode_options = {"verify_aud": False}
+        decode_options = {"verify_aud": False} if audience is None or use_custom_validation else None
 
         import jwt
         from jwt.algorithms import RSAAlgorithm
 
         header = jwt.get_unverified_header(token)
-
         verbose_proxy_logger.debug("header: %s", header)
-
+        
         kid = header.get("kid", None)
-
         public_key = await self.get_public_key(kid=kid)
 
-        if public_key is not None and isinstance(public_key, dict):
-            jwk = {}
-            if "kty" in public_key:
-                jwk["kty"] = public_key["kty"]
-            if "kid" in public_key:
-                jwk["kid"] = public_key["kid"]
-            if "n" in public_key:
-                jwk["n"] = public_key["n"]
-            if "e" in public_key:
-                jwk["e"] = public_key["e"]
+        if public_key is None:
+            raise Exception("Invalid JWT Submitted")
 
+        if isinstance(public_key, dict):
+            # Handle JWK format
+            jwk = {k: public_key[k] for k in ["kty", "kid", "n", "e"] if k in public_key}
             public_key_rsa = RSAAlgorithm.from_jwk(json.dumps(jwk))
+            return self._decode_jwt_with_rsa_key(
+                token, public_key_rsa, algorithms, decode_options, audience, 
+                use_custom_validation, audience_config
+            )
 
-            try:
-                # decode the token using the public key
-                payload = jwt.decode(
-                    token,
-                    public_key_rsa,  # type: ignore
-                    algorithms=algorithms,
-                    options=decode_options,
-                    audience=audience,
-                    leeway=self.leeway,  # allow testing of expired tokens
-                )
-                return payload
-
-            except jwt.ExpiredSignatureError:
-                # the token is expired, do something to refresh it
-                raise Exception("Token Expired")
-            except Exception as e:
-                raise Exception(f"Validation fails: {str(e)}")
-        elif public_key is not None and isinstance(public_key, str):
-            try:
-                cert = x509.load_pem_x509_certificate(
-                    public_key.encode(), default_backend()
-                )
-
-                # Extract public key
-                key = cert.public_key().public_bytes(
-                    serialization.Encoding.PEM,
-                    serialization.PublicFormat.SubjectPublicKeyInfo,
-                )
-
-                # decode the token using the public key
-                payload = jwt.decode(
-                    token,
-                    key,
-                    algorithms=algorithms,
-                    audience=audience,
-                    options=decode_options,
-                )
-                return payload
-
-            except jwt.ExpiredSignatureError:
-                # the token is expired, do something to refresh it
-                raise Exception("Token Expired")
-            except Exception as e:
-                raise Exception(f"Validation fails: {str(e)}")
+        elif isinstance(public_key, str):
+            # Handle certificate format
+            cert = x509.load_pem_x509_certificate(public_key.encode(), default_backend())
+            cert_key = cert.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            return self._decode_jwt_with_cert_key(
+                token, cert_key, algorithms, decode_options, audience, 
+                use_custom_validation, audience_config
+            )
 
         raise Exception("Invalid JWT Submitted")
 

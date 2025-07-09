@@ -1,7 +1,7 @@
 # LiteLLM Makefile
 # Simple Makefile for running tests and basic development tasks
 
-.PHONY: help test test-unit test-integration test-unit-helm lint format install-dev install-proxy-dev install-test-deps install-helm-unittest check-circular-imports check-import-safety
+.PHONY: help test test-unit test-integration lint format
 
 # Default target
 help:
@@ -101,3 +101,8 @@ test-llm-translation-single: install-test-deps
 	poetry run pytest tests/llm_translation/$(FILE) \
 		--junitxml=test-results/junit.xml \
 		-v --tb=short --maxfail=100 --timeout=300
+test-jwt:
+	poetry run pytest tests/integration/test_jwt_integration.py -v
+
+test-unit-helm:
+	helm unittest -f 'tests/*.yaml' deploy/charts/litellm-helm

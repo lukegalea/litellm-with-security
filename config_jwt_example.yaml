@@ -1,0 +1,184 @@
+# LiteLLM Proxy Configuration with Enhanced JWT Authentication
+# This example shows how to configure LiteLLM to authenticate requests using
+# JWT tokens from an external provider with multi-domain audience support
+
+model_list:
+  - model_name: gpt-4
+    litellm_params:
+      model: openai/gpt-4
+      api_key: os.environ/OPENAI_API_KEY
+  
+  - model_name: gpt-3.5-turbo
+    litellm_params:
+      model: openai/gpt-3.5-turbo
+      api_key: os.environ/OPENAI_API_KEY
+
+general_settings:
+  # Enable custom JWT authentication
+  custom_auth: litellm.proxy.custom_jwt_auth.jwt_auth
+  
+  # JWT authentication settings
+  jwt_settings:
+    # Your JWT issuer (the 'iss' claim in the JWT)
+    issuer: "https://your-flask-security-app.com"
+    
+    # URL to fetch JWKS (JSON Web Key Set) for signature verification
+    public_key_url: "https://your-flask-security-app.com/.well-known/jwks.json"
+    
+    # JWT algorithm (typically RS256 for RSA signatures)
+    algorithm: "RS256"
+    
+    # Clock skew allowance in seconds (optional, default: 0)
+    leeway: 30
+    
+    # ===== AUDIENCE VALIDATION CONFIGURATION =====
+    # Choose ONE of the following audience validation modes:
+    
+    # Option 1: Single audience (backward compatibility)
+    # Use this for simple single-domain validation
+    audience: "litellm-proxy"
+    
+    # Option 2: Multiple specific audiences (JWT RFC 7519 compliant)
+    # Uncomment to use multiple specific audience validation
+    # audience_validation:
+    #   mode: "multiple"
+    #   audiences:
+    #     - "litellm-proxy"
+    #     - "litellm.symbiotelabs.ai"
+    #     - "frontend.symbiotelabs.ai"
+    
+    # Option 3: Domain pattern matching (supports wildcards)
+    # Uncomment to use pattern-based validation
+    # audience_validation:
+    #   mode: "domain_patterns"
+    #   domain_patterns:
+    #     - "*.symbiotelabs.ai"          # Matches any subdomain
+    #     - "litellm-*"                  # Matches litellm-* services
+    #     - "https://*.example.com/*"    # Matches any URL under example.com
+    
+    # Option 4: Flexible validation (combines multiple strategies)
+    # Recommended for complex multi-domain scenarios
+    # audience_validation:
+    #   mode: "flexible"
+    #   audiences:                       # Exact matches
+    #     - "litellm-proxy"
+    #     - "api.symbiotelabs.ai"
+    #   domain_patterns:                 # Pattern matches
+    #     - "*.symbiotelabs.ai"
+    #     - "litellm-*"
+    #   allowed_domains:                 # Domain-only matches
+    #     - "symbiotelabs.ai"
+    #     - "example.com"
+    
+    # Map JWT claims to LiteLLM user context
+    user_claim_mappings:
+      user_id: "sub"          # JWT 'sub' claim -> LiteLLM user_id
+      user_email: "email"     # JWT 'email' claim -> LiteLLM user_email
+      user_role: "role"       # JWT 'role' claim -> LiteLLM user_role
+      team_id: "team"         # JWT 'team' claim -> LiteLLM team_id (optional)
+
+  # Optional: Set a master key for admin operations
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+  # Enable database for cost tracking (optional but recommended)
+  database_url: "postgresql://user:pass@localhost/litellm"
+
+litellm_settings:
+  # Enable logging for cost tracking
+  success_callback: ["postgres"]
+  failure_callback: ["postgres"]
+  
+  # Optional: Enable verbose logging for debugging
+  set_verbose: True
+
+# ===== AUDIENCE VALIDATION MODES EXPLAINED =====
+
+# 1. SINGLE MODE (backward compatibility)
+#    audience: "litellm-proxy"
+#    - Validates that JWT 'aud' claim contains exactly "litellm-proxy"
+#    - Simple and secure for single-domain setups
+
+# 2. MULTIPLE MODE (JWT RFC 7519 compliant)
+#    audience_validation:
+#      mode: "multiple"
+#      audiences: ["frontend.symbiotelabs.ai", "litellm.symbiotelabs.ai"]
+#    - Validates that JWT 'aud' claim contains at least one of the listed audiences
+#    - Supports JWT spec arrays: ["frontend.symbiotelabs.ai", "litellm.symbiotelabs.ai"]
+
+# 3. DOMAIN_PATTERNS MODE (wildcard support)
+#    audience_validation:
+#      mode: "domain_patterns"
+#      domain_patterns: ["*.symbiotelabs.ai", "litellm-*"]
+#    - Supports fnmatch wildcards: *.domain.com, service-*
+#    - Supports regex patterns for complex matching
+#    - Ideal for dynamic subdomains
+
+# 4. FLEXIBLE MODE (combined strategies)
+#    audience_validation:
+#      mode: "flexible"
+#      audiences: ["exact-match-service"]
+#      domain_patterns: ["*.domain.com"]
+#      allowed_domains: ["domain.com"]
+#    - Tries exact matches first, then patterns, then domain extraction
+#    - Most powerful but requires careful configuration
+
+# ===== EXAMPLE JWT TOKEN CLAIMS =====
+# Your JWT tokens can now include various audience formats:
+#
+# Single audience:
+# {
+#   "aud": "frontend.symbiotelabs.ai",
+#   "iss": "https://your-flask-security-app.com",
+#   "sub": "user123",
+#   ...
+# }
+#
+# Multiple audiences (JWT spec compliant):
+# {
+#   "aud": ["frontend.symbiotelabs.ai", "litellm.symbiotelabs.ai"],
+#   "iss": "https://your-flask-security-app.com", 
+#   "sub": "user123",
+#   ...
+# }
+
+# ===== USAGE EXAMPLES FOR YOUR SCENARIO =====
+
+# For your specific use case with frontend.symbiotelabs.ai and litellm.symbiotelabs.ai:
+
+# Option A: Multiple audiences (recommended)
+# audience_validation:
+#   mode: "multiple"
+#   audiences:
+#     - "frontend.symbiotelabs.ai"
+#     - "litellm.symbiotelabs.ai"
+
+# Option B: Domain patterns (if you have many subdomains)
+# audience_validation:
+#   mode: "domain_patterns"
+#   domain_patterns:
+#     - "*.symbiotelabs.ai"
+
+# Option C: Flexible (for maximum compatibility)
+# audience_validation:
+#   mode: "flexible"
+#   audiences:
+#     - "frontend.symbiotelabs.ai"
+#     - "litellm.symbiotelabs.ai"
+#   domain_patterns:
+#     - "*.symbiotelabs.ai"
+
+# Role Mappings (unchanged):
+# - "admin" or "proxy_admin" -> PROXY_ADMIN
+# - "user" or "internal_user" -> INTERNAL_USER  
+# - "viewer" or "internal_user_viewer" -> INTERNAL_USER_VIEW_ONLY
+# - "team" -> TEAM
+# - "customer" -> CUSTOMER
+# - Any other role defaults to INTERNAL_USER
+
+# Usage:
+# 1. Start the proxy: litellm --config config_jwt_example.yaml
+# 2. Make requests with JWT token:
+#    curl -X POST "http://localhost:4000/v1/chat/completions" \
+#      -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+#      -H "Content-Type: application/json" \
+#      -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello!"}]}' 

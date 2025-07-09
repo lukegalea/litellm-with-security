@@ -28,6 +28,7 @@ from typing import Dict, Optional, Any, Union, List
 import jwt
 import httpx
 from fastapi import Request, HTTPException
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from litellm._logging import verbose_proxy_logger
 from litellm.proxy._types import UserAPIKeyAuth, LitellmUserRoles

@@ -9,6 +9,7 @@ JWT token must have 'litellm_proxy_admin' in scope.
 import fnmatch
 import json
 import os
+import re
 from typing import Any, List, Literal, Optional, Set, Tuple, Union, cast
 
 from cryptography import x509
@@ -500,8 +501,6 @@ class JWTHandler:
     
     def _validate_domain_patterns(self, token_audiences: List[str], domain_patterns: List[str]) -> bool:
         """Validate against domain patterns (supports wildcards)"""
-        import re
-        
         for token_aud in token_audiences:
             for pattern in domain_patterns:
                 if self._matches_pattern(token_aud, pattern):
@@ -536,8 +535,6 @@ class JWTHandler:
     
     def _matches_pattern(self, audience: str, pattern: str) -> bool:
         """Check if audience matches a pattern (supports wildcards and regex)"""
-        import re
-        
         try:
             # Try fnmatch first (supports *.example.com style patterns)
             if fnmatch.fnmatch(audience, pattern):
@@ -575,108 +572,120 @@ class JWTHandler:
         
         return None
 
-    async def auth_jwt(self, token: str, audience_config: Optional[dict] = None) -> dict:
-        # Supported algos: https://pyjwt.readthedocs.io/en/stable/algorithms.html
-        # "Warning: Make sure not to mix symmetric and asymmetric algorithms that interpret
-        #   the key in different ways (e.g. HS* and RS*)."
-        algorithms = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512"]
+    def _validate_custom_audience(self, payload: dict, audience_config: dict) -> None:
+        """Helper method to validate custom audience configuration"""
+        token_audience = payload.get("aud")
+        if not token_audience:
+            raise Exception("JWT token missing audience claim")
+        
+        if not self.validate_audience(token_audience, audience_config):
+            raise Exception("JWT audience validation failed")
 
-        # Check if we have custom audience validation config
+    def _decode_jwt_with_rsa_key(
+        self, 
+        token: str, 
+        public_key_rsa: Any, 
+        algorithms: List[str], 
+        decode_options: Optional[dict], 
+        audience: Optional[str], 
+        use_custom_validation: bool,
+        audience_config: Optional[dict]
+    ) -> dict:
+        """Helper method to decode JWT with RSA public key"""
+        import jwt
+        
+        try:
+            payload = jwt.decode(
+                token,
+                public_key_rsa,
+                algorithms=algorithms,
+                options=decode_options,
+                audience=audience if not use_custom_validation else None,
+                leeway=self.leeway,
+            )
+            
+            if use_custom_validation and audience_config:
+                self._validate_custom_audience(payload, audience_config)
+            
+            return payload
+
+        except jwt.ExpiredSignatureError:
+            raise Exception("Token Expired")
+        except Exception as e:
+            raise Exception(f"Validation fails: {str(e)}")
+
+    def _decode_jwt_with_cert_key(
+        self, 
+        token: str, 
+        cert_key: bytes, 
+        algorithms: List[str], 
+        decode_options: Optional[dict], 
+        audience: Optional[str], 
+        use_custom_validation: bool,
+        audience_config: Optional[dict]
+    ) -> dict:
+        """Helper method to decode JWT with certificate key"""
+        import jwt
+        
+        try:
+            payload = jwt.decode(
+                token,
+                cert_key,
+                algorithms=algorithms,
+                audience=audience if not use_custom_validation else None,
+                options=decode_options,
+            )
+            
+            if use_custom_validation and audience_config:
+                self._validate_custom_audience(payload, audience_config)
+            
+            return payload
+
+        except jwt.ExpiredSignatureError:
+            raise Exception("Token Expired")
+        except Exception as e:
+            raise Exception(f"Validation fails: {str(e)}")
+
+    async def auth_jwt(self, token: str, audience_config: Optional[dict] = None) -> dict:
+        """Main JWT authentication method - refactored for reduced complexity"""
+        algorithms = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512"]
         use_custom_validation = audience_config is not None
         
         audience = os.getenv("JWT_AUDIENCE")
-        decode_options = None
-        if audience is None or use_custom_validation:
-            decode_options = {"verify_aud": False}
+        decode_options = {"verify_aud": False} if audience is None or use_custom_validation else None
 
         import jwt
         from jwt.algorithms import RSAAlgorithm
 
         header = jwt.get_unverified_header(token)
-
         verbose_proxy_logger.debug("header: %s", header)
-
+        
         kid = header.get("kid", None)
-
         public_key = await self.get_public_key(kid=kid)
 
-        if public_key is not None and isinstance(public_key, dict):
-            jwk = {}
-            if "kty" in public_key:
-                jwk["kty"] = public_key["kty"]
-            if "kid" in public_key:
-                jwk["kid"] = public_key["kid"]
-            if "n" in public_key:
-                jwk["n"] = public_key["n"]
-            if "e" in public_key:
-                jwk["e"] = public_key["e"]
+        if public_key is None:
+            raise Exception("Invalid JWT Submitted")
 
+        if isinstance(public_key, dict):
+            # Handle JWK format
+            jwk = {k: public_key[k] for k in ["kty", "kid", "n", "e"] if k in public_key}
             public_key_rsa = RSAAlgorithm.from_jwk(json.dumps(jwk))
+            return self._decode_jwt_with_rsa_key(
+                token, public_key_rsa, algorithms, decode_options, audience, 
+                use_custom_validation, audience_config
+            )
 
-            try:
-                # decode the token using the public key
-                payload = jwt.decode(
-                    token,
-                    public_key_rsa,  # type: ignore
-                    algorithms=algorithms,
-                    options=decode_options,
-                    audience=audience if not use_custom_validation else None,
-                    leeway=self.leeway,  # allow testing of expired tokens
-                )
-                
-                # Custom audience validation if configured
-                if use_custom_validation:
-                    token_audience = payload.get("aud")
-                    if not token_audience:
-                        raise Exception("JWT token missing audience claim")
-                    
-                    if not self.validate_audience(token_audience, audience_config):
-                        raise Exception("JWT audience validation failed")
-                
-                return payload
-
-            except jwt.ExpiredSignatureError:
-                # the token is expired, do something to refresh it
-                raise Exception("Token Expired")
-            except Exception as e:
-                raise Exception(f"Validation fails: {str(e)}")
-        elif public_key is not None and isinstance(public_key, str):
-            try:
-                cert = x509.load_pem_x509_certificate(
-                    public_key.encode(), default_backend()
-                )
-
-                # Extract public key
-                key = cert.public_key().public_bytes(
-                    serialization.Encoding.PEM,
-                    serialization.PublicFormat.SubjectPublicKeyInfo,
-                )
-
-                # decode the token using the public key
-                payload = jwt.decode(
-                    token,
-                    key,
-                    algorithms=algorithms,
-                    audience=audience if not use_custom_validation else None,
-                    options=decode_options,
-                )
-                
-                # Custom audience validation if configured
-                if use_custom_validation:
-                    token_audience = payload.get("aud")
-                    if not token_audience:
-                        raise Exception("JWT token missing audience claim")
-                    
-                    if not self.validate_audience(token_audience, audience_config):
-                        raise Exception("JWT audience validation failed")
-                
-                return payload
-
-            except jwt.ExpiredSignatureError:
-                # the token is expired, do something to refresh it
-                raise Exception("Token Expired")
-            except Exception as e:
-                raise Exception(f"Validation fails: {str(e)}")
+        elif isinstance(public_key, str):
+            # Handle certificate format
+            cert = x509.load_pem_x509_certificate(public_key.encode(), default_backend())
+            cert_key = cert.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            return self._decode_jwt_with_cert_key(
+                token, cert_key, algorithms, decode_options, audience, 
+                use_custom_validation, audience_config
+            )
 
         raise Exception("Invalid JWT Submitted")
 

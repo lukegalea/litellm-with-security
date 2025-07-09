@@ -20,18 +20,14 @@ Usage:
           team_id: "team"
 """
 
-import json
 import time
 import re
 import fnmatch
 from typing import Dict, Optional, Any, Union, List
-from urllib.parse import urljoin
 
 import jwt
 import httpx
 from fastapi import Request, HTTPException
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from litellm._logging import verbose_proxy_logger
 from litellm.proxy._types import UserAPIKeyAuth, LitellmUserRoles

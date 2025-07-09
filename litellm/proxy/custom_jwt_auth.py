@@ -38,20 +38,31 @@ class JWTConfig:
     """Configuration for JWT authentication with enhanced multi-domain audience support"""
     
     def __init__(self, jwt_settings: Dict[str, Any]):
-        self.issuer = jwt_settings.get("issuer")
-        self.public_key_url = jwt_settings.get("public_key_url")
-        self.user_claim_mappings = jwt_settings.get("user_claim_mappings", {})
-        self.algorithm = jwt_settings.get("algorithm", "RS256")
-        self.leeway = jwt_settings.get("leeway", 0)
+        # Get required settings with validation
+        issuer = jwt_settings.get("issuer")
+        public_key_url = jwt_settings.get("public_key_url")
+        
+        if not issuer:
+            raise ValueError("JWT issuer is required")
+        if not public_key_url:
+            raise ValueError("JWT public_key_url is required")
+            
+        # Now assign with proper types
+        self.issuer: str = issuer
+        self.public_key_url: str = public_key_url
+        self.user_claim_mappings: Dict[str, str] = jwt_settings.get("user_claim_mappings", {})
+        self.algorithm: str = jwt_settings.get("algorithm", "RS256")
+        self.leeway: int = jwt_settings.get("leeway", 0)
+        
+        # Audience configuration attributes (set by _parse_audience_config)
+        self.audience_mode: str
+        self.audiences: List[str]
+        self.allowed_domains: List[str]
+        self.domain_patterns: List[str]
+        self.require_exact_match: bool
         
         # Enhanced audience configuration
         self._parse_audience_config(jwt_settings)
-        
-        # Validation
-        if not self.issuer:
-            raise ValueError("JWT issuer is required")
-        if not self.public_key_url:
-            raise ValueError("JWT public_key_url is required")
     
     def _parse_audience_config(self, jwt_settings: Dict[str, Any]):
         """Parse and validate audience configuration"""

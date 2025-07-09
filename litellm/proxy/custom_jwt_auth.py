@@ -22,7 +22,9 @@ Usage:
 
 import json
 import time
-from typing import Dict, Optional, Any
+import re
+import fnmatch
+from typing import Dict, Optional, Any, Union, List
 from urllib.parse import urljoin
 
 import jwt
@@ -36,21 +38,176 @@ from litellm.proxy._types import UserAPIKeyAuth, LitellmUserRoles
 
 
 class JWTConfig:
-    """Configuration for JWT authentication"""
+    """Configuration for JWT authentication with enhanced multi-domain audience support"""
     
     def __init__(self, jwt_settings: Dict[str, Any]):
         self.issuer = jwt_settings.get("issuer")
-        self.audience = jwt_settings.get("audience") 
         self.public_key_url = jwt_settings.get("public_key_url")
         self.user_claim_mappings = jwt_settings.get("user_claim_mappings", {})
         self.algorithm = jwt_settings.get("algorithm", "RS256")
         self.leeway = jwt_settings.get("leeway", 0)
+        
+        # Enhanced audience configuration
+        self._parse_audience_config(jwt_settings)
         
         # Validation
         if not self.issuer:
             raise ValueError("JWT issuer is required")
         if not self.public_key_url:
             raise ValueError("JWT public_key_url is required")
+    
+    def _parse_audience_config(self, jwt_settings: Dict[str, Any]):
+        """Parse and validate audience configuration"""
+        # Support multiple configuration formats for backward compatibility
+        audience_config = jwt_settings.get("audience_validation", {})
+        
+        # Backward compatibility: if 'audience' is specified directly
+        if "audience" in jwt_settings and not audience_config:
+            audience_config = {
+                "mode": "single",
+                "audiences": [jwt_settings["audience"]]
+            }
+        
+        # Default configuration if not specified
+        if not audience_config:
+            raise ValueError("JWT audience validation configuration is required")
+        
+        self.audience_mode = audience_config.get("mode", "single")
+        self.audiences = audience_config.get("audiences", [])
+        self.allowed_domains = audience_config.get("allowed_domains", [])
+        self.domain_patterns = audience_config.get("domain_patterns", [])
+        self.require_exact_match = audience_config.get("require_exact_match", True)
+        
+        # Validate configuration
+        if self.audience_mode not in ["single", "multiple", "domain_patterns", "flexible"]:
+            raise ValueError(f"Invalid audience mode: {self.audience_mode}")
+        
+        if self.audience_mode in ["single", "multiple"] and not self.audiences:
+            raise ValueError(f"audiences list is required for mode: {self.audience_mode}")
+        
+        if self.audience_mode == "domain_patterns" and not self.domain_patterns:
+            raise ValueError("domain_patterns list is required for domain_patterns mode")
+    
+    def validate_audience(self, token_audiences: Union[str, List[str]]) -> bool:
+        """
+        Validate JWT audience claims against configured validation rules
+        
+        Args:
+            token_audiences: Audience claim(s) from JWT token
+            
+        Returns:
+            bool: True if audience validation passes
+        """
+        # Normalize token audiences to list
+        if isinstance(token_audiences, str):
+            token_audiences = [token_audiences]
+        
+        verbose_proxy_logger.debug(f"Validating audiences: {token_audiences} against mode: {self.audience_mode}")
+        
+        if self.audience_mode == "single":
+            return self._validate_single_audience(token_audiences)
+        elif self.audience_mode == "multiple":
+            return self._validate_multiple_audiences(token_audiences)
+        elif self.audience_mode == "domain_patterns":
+            return self._validate_domain_patterns(token_audiences)
+        elif self.audience_mode == "flexible":
+            return self._validate_flexible(token_audiences)
+        
+        return False
+    
+    def _validate_single_audience(self, token_audiences: List[str]) -> bool:
+        """Validate against a single expected audience"""
+        if len(self.audiences) != 1:
+            verbose_proxy_logger.error("Single audience mode requires exactly one configured audience")
+            return False
+        
+        expected_audience = self.audiences[0]
+        return expected_audience in token_audiences
+    
+    def _validate_multiple_audiences(self, token_audiences: List[str]) -> bool:
+        """Validate against multiple allowed audiences (JWT spec compliant)"""
+        # Check if any token audience matches any configured audience
+        for token_aud in token_audiences:
+            if token_aud in self.audiences:
+                verbose_proxy_logger.debug(f"Audience match found: {token_aud}")
+                return True
+        
+        verbose_proxy_logger.warning(f"No audience match found. Token: {token_audiences}, Configured: {self.audiences}")
+        return False
+    
+    def _validate_domain_patterns(self, token_audiences: List[str]) -> bool:
+        """Validate against domain patterns (supports wildcards)"""
+        for token_aud in token_audiences:
+            for pattern in self.domain_patterns:
+                # Support both fnmatch-style wildcards and regex patterns
+                if self._matches_pattern(token_aud, pattern):
+                    verbose_proxy_logger.debug(f"Audience {token_aud} matches pattern {pattern}")
+                    return True
+        
+        verbose_proxy_logger.warning(f"No pattern match found. Token: {token_audiences}, Patterns: {self.domain_patterns}")
+        return False
+    
+    def _validate_flexible(self, token_audiences: List[str]) -> bool:
+        """Flexible validation combining multiple strategies"""
+        # Try exact matches first
+        if self.audiences and self._validate_multiple_audiences(token_audiences):
+            return True
+        
+        # Try domain patterns
+        if self.domain_patterns and self._validate_domain_patterns(token_audiences):
+            return True
+        
+        # Try allowed domains
+        if self.allowed_domains:
+            for token_aud in token_audiences:
+                domain = self._extract_domain(token_aud)
+                if domain:
+                    for allowed_domain in self.allowed_domains:
+                        # Check exact match or if domain is a subdomain of allowed domain
+                        if domain == allowed_domain or domain.endswith('.' + allowed_domain):
+                            verbose_proxy_logger.debug(f"Audience domain {domain} matches allowed domain {allowed_domain}")
+                            return True
+        
+        return False
+    
+    def _matches_pattern(self, audience: str, pattern: str) -> bool:
+        """Check if audience matches a pattern (supports wildcards and regex)"""
+        try:
+            # Try fnmatch first (supports *.example.com style patterns)
+            if fnmatch.fnmatch(audience, pattern):
+                return True
+            
+            # Try as regex pattern if fnmatch fails
+            if re.match(pattern, audience):
+                return True
+                
+        except re.error:
+            # If regex is invalid, fall back to exact string match
+            verbose_proxy_logger.warning(f"Invalid regex pattern: {pattern}, falling back to exact match")
+            return audience == pattern
+        
+        return False
+    
+    def _extract_domain(self, audience: str) -> Optional[str]:
+        """Extract domain from audience (handles URLs and plain domains)"""
+        try:
+            # Handle URLs
+            if audience.startswith(('http://', 'https://')):
+                from urllib.parse import urlparse
+                parsed = urlparse(audience)
+                return parsed.netloc
+            
+            # Handle plain domain names - validate they are proper domains
+            if ('.' in audience and 
+                not audience.startswith('.') and 
+                not audience.endswith('.') and
+                '..' not in audience):  # No consecutive dots
+                return audience
+                
+        except Exception as e:
+            verbose_proxy_logger.warning(f"Failed to extract domain from {audience}: {e}")
+        
+        return None
 
 
 class JWKSCache:
@@ -211,15 +368,26 @@ async def validate_jwt_token(token: str, config: JWTConfig) -> Dict[str, Any]:
         # Get public key
         public_key = await get_public_key(unverified_header, config)
         
-        # Validate token
+        # Validate token WITHOUT audience validation (we'll do custom validation)
         claims = jwt.decode(
             token,
             public_key,
             algorithms=[config.algorithm],
             issuer=config.issuer,
-            audience=config.audience,
+            # Don't use PyJWT's audience validation - we have custom logic
+            options={"verify_aud": False},
             leeway=config.leeway
         )
+        
+        # Custom audience validation
+        token_audience = claims.get("aud")
+        if not token_audience:
+            verbose_proxy_logger.warning("JWT token missing audience claim")
+            raise HTTPException(status_code=401, detail="JWT token missing audience claim")
+        
+        if not config.validate_audience(token_audience):
+            verbose_proxy_logger.warning(f"JWT audience validation failed for: {token_audience}")
+            raise HTTPException(status_code=401, detail="JWT audience validation failed")
         
         verbose_proxy_logger.debug(f"Successfully validated JWT for user: {claims.get('sub')}")
         return claims
@@ -230,6 +398,9 @@ async def validate_jwt_token(token: str, config: JWTConfig) -> Dict[str, Any]:
     except jwt.InvalidTokenError as e:
         verbose_proxy_logger.warning(f"Invalid JWT token: {e}")
         raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+    except HTTPException:
+        # Re-raise HTTPException as-is (these are our custom validation errors)
+        raise
     except Exception as e:
         verbose_proxy_logger.error(f"JWT validation error: {e}")
         raise HTTPException(status_code=401, detail="Token validation failed")

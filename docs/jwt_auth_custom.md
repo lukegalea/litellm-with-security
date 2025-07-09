@@ -267,9 +267,138 @@ jwt_settings:
     team_id: "department"       # Use department as team
 ```
 
-### Multiple Audiences
+### Multi-Domain Audience Validation
 
-To support multiple audiences:
+LiteLLM supports sophisticated audience validation for multi-domain environments, allowing tokens issued for one domain to be validated against different domains. This is particularly useful for microservices architectures and cross-domain token usage.
+
+#### Configuration Modes
+
+Configure audience validation using the `audience_validation` section:
+
+```yaml
+jwt_settings:
+  issuer: "https://your-auth-provider.com"
+  public_key_url: "https://your-auth-provider.com/.well-known/jwks.json"
+  
+  # Multi-domain audience validation
+  audience_validation:
+    mode: "flexible"  # Options: single, multiple, domain_patterns, flexible
+    audiences: ["frontend.symbiotelabs.ai", "litellm.symbiotelabs.ai"]
+    domain_patterns: ["*.symbiotelabs.ai", "*.*.symbiotelabs.ai"]
+    allowed_domains: ["symbiotelabs.ai"]
+```
+
+#### Validation Modes
+
+**1. Single Audience (backward compatible)**
+```yaml
+audience_validation:
+  mode: "single"
+  audiences: ["litellm-proxy"]
+```
+- Requires exact match with one configured audience
+- Backward compatible with simple `audience: "litellm-proxy"` config
+
+**2. Multiple Audiences (JWT RFC 7519 compliant)**
+```yaml
+audience_validation:
+  mode: "multiple"  
+  audiences: ["frontend.symbiotelabs.ai", "litellm.symbiotelabs.ai", "api.symbiotelabs.ai"]
+```
+- Validates if any token audience matches any configured audience
+- Follows JWT specification for multiple audiences
+
+**3. Domain Patterns (wildcard and regex support)**
+```yaml
+audience_validation:
+  mode: "domain_patterns"
+  domain_patterns: 
+    - "*.symbiotelabs.ai"           # Wildcard matching
+    - "litellm-*"                   # Prefix matching  
+    - "^[a-z]+\\.example\\.com$"   # Regex patterns
+```
+- Supports fnmatch-style wildcards (`*.domain.com`)
+- Supports regex patterns for complex matching
+- Falls back to exact string matching for invalid regex
+
+**4. Flexible Validation (combines all strategies)**
+```yaml
+audience_validation:
+  mode: "flexible"
+  audiences: ["exact.domain.com"]           # Exact matches
+  domain_patterns: ["*.symbiotelabs.ai"]   # Pattern matches
+  allowed_domains: ["symbiotelabs.ai"]     # Domain extraction
+```
+- Tries multiple validation strategies in order
+- Most permissive option for complex environments
+
+#### Cross-Domain Use Case
+
+For the specific scenario where frontend tokens need to work with LiteLLM:
+
+```yaml
+# Scenario: Tokens issued for "frontend.symbiotelabs.ai" 
+# should be valid for "litellm.symbiotelabs.ai"
+
+jwt_settings:
+  issuer: "https://symbiotelabs.ai"
+  public_key_url: "https://symbiotelabs.ai/.well-known/jwks.json"
+  
+  audience_validation:
+    mode: "domain_patterns"
+    domain_patterns: ["*.symbiotelabs.ai"]
+```
+
+This configuration allows:
+- `frontend.symbiotelabs.ai` ✅
+- `litellm.symbiotelabs.ai` ✅  
+- `api.symbiotelabs.ai` ✅
+- `other.domain.com` ❌
+
+#### URL and Domain Handling
+
+The validation system intelligently handles both URLs and plain domains:
+
+```yaml
+# These audience claims are all valid:
+# - "frontend.symbiotelabs.ai"
+# - "https://frontend.symbiotelabs.ai/app"
+# - "https://litellm.symbiotelabs.ai:8080/api"
+
+audience_validation:
+  mode: "flexible"
+  allowed_domains: ["symbiotelabs.ai"]  # Extracts domain from URLs
+```
+
+#### Migration from Simple Audience
+
+**Before (simple configuration):**
+```yaml
+jwt_settings:
+  audience: "litellm-proxy"
+```
+
+**After (multi-domain configuration):**
+```yaml
+jwt_settings:
+  audience_validation:
+    mode: "single"  # Maintains exact same behavior
+    audiences: ["litellm-proxy"]
+```
+
+Or for enhanced flexibility:
+```yaml
+jwt_settings:
+  audience_validation:
+    mode: "flexible"
+    audiences: ["litellm-proxy"]  # Exact match
+    domain_patterns: ["litellm-*"]  # Pattern match
+    allowed_domains: ["your-domain.com"]  # Domain match
+```
+
+#### Multiple Audiences (Legacy Support)
+
+For backward compatibility, simple array format is still supported:
 
 ```yaml
 jwt_settings:

@@ -1,11 +1,13 @@
 version: "3.11"
 services:
   litellm:
-    build:
-      context: .
-      args:
-        target: runtime
-    image: ghcr.io/berriai/litellm:main-stable
+    # Uncomment build section for local development
+    # build:
+    #   context: .
+    #   args:
+    #     target: runtime
+    # Use custom image from your GHCR
+    image: ghcr.io/lukegalea/litellm:latest
     #########################################
     ## Uncomment these lines to start proxy with a config.yaml file ##
     #volumes:
@@ -16,7 +18,7 @@ services:
     #  - "--config=/app/config.yaml"
     ##############################################
     ports:
-      - "4000:4000" # Map the container port to the host, change the host port if necessary
+      - "4001:4000" # Map the container port to the host, avoiding local port conflicts
     environment:
       DATABASE_URL: "postgresql://llmproxy:dbpassword9090@db:5432/litellm"
       STORE_MODEL_IN_DB: "True" # allows adding models to proxy via UI
@@ -40,7 +42,7 @@ services:
       POSTGRES_USER: llmproxy
       POSTGRES_PASSWORD: dbpassword9090
     ports:
-      - "5432:5432"
+      - "5433:5432"  # Avoiding local port conflicts
     volumes:
       - postgres_data:/var/lib/postgresql/data # Persists Postgres data across container restarts
     healthcheck:
@@ -55,7 +57,7 @@ services:
       - prometheus_data:/prometheus
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
-      - "9090:9090"
+      - "9091:9090"  # Avoiding local port conflicts
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"

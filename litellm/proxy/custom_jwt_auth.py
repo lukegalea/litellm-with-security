@@ -470,7 +470,7 @@ async def _ensure_user_exists(user_auth: UserAPIKeyAuth, config: JWTConfig) -> N
         verbose_proxy_logger.debug("JWT authentication will continue without user creation")
 
 
-async def jwt_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
+async def jwt_auth(request: Request, api_key: str) -> Optional[UserAPIKeyAuth]:
     """
     Main JWT authentication function for LiteLLM custom auth
     
@@ -503,8 +503,10 @@ async def jwt_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
     
     # Check if the token looks like a JWT (has 3 parts separated by dots)
     if not api_key or api_key.count('.') != 2:
-        verbose_proxy_logger.warning("Received non-JWT token in JWT auth handler")
-        raise HTTPException(status_code=401, detail="Expected JWT token")
+        verbose_proxy_logger.debug("Received non-JWT token in JWT auth handler, falling back to standard auth")
+        # This is not a JWT token, return None to signal fallback to standard authentication
+        # When custom auth returns None, LiteLLM continues with standard auth (master key, DB lookup, etc.)
+        return None
     
     # Validate the JWT token
     claims = await validate_jwt_token(api_key, config)
@@ -516,4 +518,60 @@ async def jwt_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
     await _ensure_user_exists(user_auth, config)
     
     verbose_proxy_logger.info(f"Successfully authenticated user {user_auth.user_id} via JWT")
-    return user_auth 
+    return user_auth
+
+
+async def hybrid_jwt_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
+    """
+    Hybrid authentication function that tries JWT auth first and falls back to standard auth.
+    
+    This mimics the enterprise "auto" mode behavior where custom auth failures 
+    allow fallback to standard authentication.
+    
+    Args:
+        request: FastAPI request object
+        api_key: The API key or JWT token from Authorization header
+        
+    Returns:
+        UserAPIKeyAuth: Object containing user authentication information
+        
+    Raises:
+        Exception: If neither JWT nor standard auth succeeds
+    """
+    # First try JWT authentication for JWT tokens
+    try:
+        # Only attempt JWT auth if the token looks like a JWT
+        if api_key and api_key.count('.') == 2:
+            verbose_proxy_logger.debug("Attempting JWT authentication")
+            return await jwt_auth(request, api_key)
+    except Exception as e:
+        verbose_proxy_logger.debug(f"JWT authentication failed, falling back to standard auth: {e}")
+        # Fall through to standard auth below
+    
+    # If not a JWT or JWT auth failed, use standard LiteLLM authentication
+    verbose_proxy_logger.debug("Using standard LiteLLM authentication")
+    
+    # Import necessary modules for standard auth
+    from litellm.proxy.proxy_server import (
+        master_key, 
+        prisma_client, 
+        user_api_key_cache,
+        proxy_logging_obj,
+        litellm_proxy_admin_name
+    )
+    from litellm.proxy.auth.user_api_key_auth import _user_api_key_auth_builder
+    from litellm.proxy._types import LitellmUserRoles
+    import secrets
+    
+    # Check if it's the master key first (most common for UI access)
+    if master_key and secrets.compare_digest(api_key, master_key):
+        verbose_proxy_logger.debug("Authenticated using master key")
+        return UserAPIKeyAuth(
+            api_key=api_key,
+            user_role=LitellmUserRoles.PROXY_ADMIN,
+            user_id=litellm_proxy_admin_name,
+        )
+    
+    # If not master key, raise an exception to let the standard auth system handle it
+    # This ensures that database lookups and other standard auth mechanisms still work
+    raise Exception("Not a JWT or master key - defer to standard authentication") 

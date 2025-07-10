@@ -10,8 +10,10 @@ model_list:
       api_key: os.environ/ANTHROPIC_API_KEY
 
 general_settings:
-  # Enable CUSTOM JWT authentication (open source compatible)
+  # Enable JWT authentication with enterprise auto-fallback
   custom_auth: litellm.proxy.custom_jwt_auth.jwt_auth
+  
+
   
   # JWT authentication settings
   jwt_settings:

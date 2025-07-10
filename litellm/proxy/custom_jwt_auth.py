@@ -5,14 +5,25 @@ This module provides JWT validation for external authentication providers
 (like Flask-Security) while maintaining compatibility with LiteLLM's 
 cost tracking and logging features.
 
+Features:
+- JWT signature validation using JWKS
+- Flexible audience validation (single, multiple, domain patterns)
+- User claim mapping to LiteLLM context
+- Automatic user creation for cost tracking (configurable)
+
 Usage:
     Configure in config.yaml:
     general_settings:
       custom_auth: custom_jwt_auth.jwt_auth
       jwt_settings:
         issuer: "https://your-auth-provider.com"
-        audience: "litellm-proxy"
         public_key_url: "https://your-auth-provider.com/.well-known/jwks.json"
+        algorithm: "RS256"
+        leeway: 30
+        auto_create_users: true  # Enable automatic user creation for cost tracking
+        audience_validation:
+          mode: "flexible"
+          audiences: ["litellm-proxy", "your-app"]
         user_claim_mappings:
           user_id: "sub"
           user_email: "email"
@@ -53,6 +64,7 @@ class JWTConfig:
         self.user_claim_mappings: Dict[str, str] = jwt_settings.get("user_claim_mappings", {})
         self.algorithm: str = jwt_settings.get("algorithm", "RS256")
         self.leeway: int = jwt_settings.get("leeway", 0)
+        self.auto_create_users: bool = jwt_settings.get("auto_create_users", True)
         
         # Audience configuration attributes (set by _parse_audience_config)
         self.audience_mode: str
@@ -414,6 +426,50 @@ async def validate_jwt_token(token: str, config: JWTConfig) -> Dict[str, Any]:
         raise HTTPException(status_code=401, detail="Token validation failed")
 
 
+async def _ensure_user_exists(user_auth: UserAPIKeyAuth, config: JWTConfig) -> None:
+    """
+    Ensure that a user exists in the database for cost tracking.
+    If the user doesn't exist, create them automatically (if enabled).
+    """
+    if not user_auth.user_id:
+        verbose_proxy_logger.debug("No user_id provided, skipping user creation")
+        return
+    
+    if not config.auto_create_users:
+        verbose_proxy_logger.debug("Auto user creation disabled, skipping user creation")
+        return
+    
+    try:
+        # Import required modules for user management
+        from litellm.proxy.proxy_server import prisma_client, user_api_key_cache, proxy_logging_obj
+        from litellm.proxy.auth.auth_checks import get_user_object
+        
+        if not prisma_client:
+            verbose_proxy_logger.warning("Database not connected, cannot create user for cost tracking")
+            return
+        
+        # Try to get or create the user
+        user_object = await get_user_object(
+            user_id=user_auth.user_id,
+            prisma_client=prisma_client,
+            user_api_key_cache=user_api_key_cache,
+            user_id_upsert=True,  # This enables automatic user creation
+            proxy_logging_obj=proxy_logging_obj,
+            user_email=user_auth.user_email,
+            sso_user_id=user_auth.user_id,
+        )
+        
+        if user_object:
+            verbose_proxy_logger.info(f"User {user_auth.user_id} ready for cost tracking")
+        else:
+            verbose_proxy_logger.warning(f"Failed to create/retrieve user {user_auth.user_id}")
+            
+    except Exception as e:
+        # Don't fail authentication if user creation fails
+        verbose_proxy_logger.warning(f"Failed to ensure user exists for {user_auth.user_id}: {e}")
+        verbose_proxy_logger.debug("JWT authentication will continue without user creation")
+
+
 async def jwt_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
     """
     Main JWT authentication function for LiteLLM custom auth
@@ -455,6 +511,9 @@ async def jwt_auth(request: Request, api_key: str) -> UserAPIKeyAuth:
     
     # Map claims to UserAPIKeyAuth object
     user_auth = map_jwt_claims_to_user_auth(claims, config)
+    
+    # Automatically create internal user if JWT authentication succeeds
+    await _ensure_user_exists(user_auth, config)
     
     verbose_proxy_logger.info(f"Successfully authenticated user {user_auth.user_id} via JWT")
     return user_auth 

@@ -1,0 +1,51 @@
+model_list:
+  - model_name: gpt-4
+    litellm_params:
+      model: openai/gpt-4
+      api_key: os.environ/OPENAI_API_KEY
+  
+  - model_name: anthropic/*
+    litellm_params:
+      model: anthropic/*
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+general_settings:
+  # Enable CUSTOM JWT authentication (open source compatible)
+  custom_auth: litellm.proxy.custom_jwt_auth.jwt_auth
+  
+  # JWT authentication settings
+  jwt_settings:
+    # Your JWT issuer (matches the 'iss' claim in your JWT)
+    issuer: "https://https-proxy"
+    
+    # URL to fetch JWKS (JSON Web Key Set) for signature verification
+    # You'll need to provide this endpoint from your auth provider
+    public_key_url: "https://your-auth-provider.com/.well-known/jwks.json"
+    
+    # JWT algorithm (typically RS256 for RSA signatures)
+    algorithm: "RS256"
+    
+    # Clock skew allowance in seconds (optional, default: 0)
+    leeway: 30
+    
+    # Multi-domain audience validation to handle "fastmcp" audience
+    audience_validation:
+      mode: "flexible"
+      audiences: ["fastmcp", "litellm-proxy"]  # Accept both audiences
+      # Or use domain patterns if you have multiple services:
+      # domain_patterns: ["*.symbiotelabs.ai", "fastmcp"]
+    
+    # Map JWT claims to LiteLLM user context
+    user_claim_mappings:
+      user_id: "sub"          # JWT 'sub' claim -> LiteLLM user_id
+      user_email: "email"     # JWT 'email' claim -> LiteLLM user_email  
+      user_role: "roles"      # JWT 'roles' array -> LiteLLM user_role
+      # team_id: "team"       # Optional: if you have team claims
+
+# Optional: Database for cost tracking
+# general_settings:
+#   database_url: "postgresql://user:pass@localhost/litellm"
+# 
+# litellm_settings:
+#   success_callback: ["postgres"]
+#   failure_callback: ["postgres"] 

@@ -1,0 +1,33 @@
+model_list:
+  - model_name: gpt-4
+    litellm_params:
+      model: openai/gpt-4
+      api_key: os.environ/OPENAI_API_KEY
+  
+  - model_name: anthropic/*
+    litellm_params:
+      model: anthropic/*
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+environment_variables:
+  JWT_PUBLIC_KEY_URL: "https://your-auth-provider.com/.well-known/jwks.json"
+  JWT_AUDIENCE: "fastmcp"  # Matches your JWT audience
+
+general_settings:
+  # Enable ENTERPRISE JWT authentication
+  enable_jwt_auth: True
+  
+  litellm_jwtauth:
+    # Map JWT claims to LiteLLM fields
+    user_id_jwt_field: "sub"
+    user_email_jwt_field: "email" 
+    user_roles_jwt_field: "roles"
+    user_allowed_roles: ["user", "admin"]  # Roles that are allowed
+    user_id_upsert: true  # Create user if they don't exist
+    
+    # Admin configuration
+    admin_jwt_scope: "admin"  # If roles contains "admin", treat as admin
+    
+    # Optional: team/org mapping
+    # team_id_jwt_field: "team"
+    # org_id_jwt_field: "org" 

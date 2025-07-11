@@ -21,7 +21,8 @@ general_settings:
     issuer: "https://https-proxy"
     
     # URL to fetch JWKS (JSON Web Key Set) for signature verification
-    # You'll need to provide this endpoint from your auth provider
+    # IMPORTANT: Update this URL to point to your actual JWKS endpoint
+    # For https-proxy issuer, this should be: https://https-proxy/.well-known/jwks.json
     public_key_url: "https://your-auth-provider.com/.well-known/jwks.json"
     
     # JWT algorithm (typically RS256 for RSA signatures)
@@ -29,6 +30,9 @@ general_settings:
     
     # Clock skew allowance in seconds (optional, default: 0)
     leeway: 30
+    
+    # Automatically create users in database for cost tracking (optional, default: true)
+    auto_create_users: true
     
     # Multi-domain audience validation to handle "fastmcp" audience
     audience_validation:

@@ -315,18 +315,26 @@ def jwk_to_public_key(jwk: Dict[str, Any]) -> Any:
 async def get_public_key(token_header: Dict[str, Any], config: JWTConfig) -> Any:
     """Get the public key for JWT validation"""
     kid = token_header.get("kid")
-    if not kid:
-        raise HTTPException(status_code=401, detail="JWT token missing 'kid' in header")
     
     # Fetch JWKS
     jwks = await fetch_jwks(config.public_key_url)
     
-    # Find the matching key
-    for key in jwks.get("keys", []):
-        if key.get("kid") == kid:
-            return jwk_to_public_key(key)
+    # If JWT has a kid, use it to find the matching key
+    if kid:
+        for key in jwks.get("keys", []):
+            if key.get("kid") == kid:
+                return jwk_to_public_key(key)
+        raise HTTPException(status_code=401, detail=f"Unable to find public key with kid: {kid}")
     
-    raise HTTPException(status_code=401, detail=f"Unable to find public key with kid: {kid}")
+    # If no kid in JWT, try to use the first available key
+    # This handles cases where the JWT provider doesn't use kid headers
+    keys = jwks.get("keys", [])
+    if not keys:
+        raise HTTPException(status_code=401, detail="No public keys available in JWKS")
+    
+    # Use the first key if no kid specified
+    verbose_proxy_logger.debug(f"JWT token missing 'kid' in header, using first available key")
+    return jwk_to_public_key(keys[0])
 
 
 def map_jwt_claims_to_user_auth(claims: Dict[str, Any], config: JWTConfig) -> UserAPIKeyAuth:
@@ -340,10 +348,16 @@ def map_jwt_claims_to_user_auth(claims: Dict[str, Any], config: JWTConfig) -> Us
     
     # Map role to LiteLLM user role
     role_claim = claims.get(mappings.get("user_role", "role"))
+    
+    # Handle case where role is an array (like ["user"])
+    if isinstance(role_claim, list) and len(role_claim) > 0:
+        role_claim = role_claim[0]  # Use first role if it's an array
+    
     user_role = map_role_to_litellm_role(role_claim)
     
-    # Create UserAPIKeyAuth object
+    # Create UserAPIKeyAuth object - set api_key to the JWT token for spend tracking
     auth_obj = UserAPIKeyAuth(
+        api_key=None,  # Will be set by the caller
         user_id=user_id,
         user_email=user_email,
         user_role=user_role,
@@ -351,7 +365,15 @@ def map_jwt_claims_to_user_auth(claims: Dict[str, Any], config: JWTConfig) -> Us
         # Add any additional metadata
         metadata={
             "jwt_claims": claims,
-            "auth_method": "jwt"
+            "auth_method": "jwt",
+            "user_api_key_hash": None,  # Will be set by LiteLLM
+            "user_api_key_alias": None,
+            "user_api_key_team_id": team_id,
+            "user_api_key_user_id": user_id,
+            "user_api_key_org_id": None,
+            "user_api_key_team_alias": None,
+            "user_api_key_end_user_id": None,
+            "user_api_key_user_email": user_email,
         }
     )
     
@@ -368,15 +390,20 @@ def map_role_to_litellm_role(role_claim: Optional[str]) -> LitellmUserRoles:
     role_mappings = {
         "admin": LitellmUserRoles.PROXY_ADMIN,
         "proxy_admin": LitellmUserRoles.PROXY_ADMIN,
+        "administrator": LitellmUserRoles.PROXY_ADMIN,
         "user": LitellmUserRoles.INTERNAL_USER,
         "internal_user": LitellmUserRoles.INTERNAL_USER,
+        "standard_user": LitellmUserRoles.INTERNAL_USER,
         "viewer": LitellmUserRoles.INTERNAL_USER_VIEW_ONLY,
         "internal_user_viewer": LitellmUserRoles.INTERNAL_USER_VIEW_ONLY,
+        "read_only": LitellmUserRoles.INTERNAL_USER_VIEW_ONLY,
         "team": LitellmUserRoles.TEAM,
         "customer": LitellmUserRoles.CUSTOMER,
     }
     
-    return role_mappings.get(role_claim.lower(), LitellmUserRoles.INTERNAL_USER)
+    mapped_role = role_mappings.get(role_claim.lower(), LitellmUserRoles.INTERNAL_USER)
+    verbose_proxy_logger.debug(f"Mapped role '{role_claim}' to LiteLLM role: {mapped_role}")
+    return mapped_role
 
 
 async def validate_jwt_token(token: str, config: JWTConfig) -> Dict[str, Any]:
@@ -464,10 +491,17 @@ async def _ensure_user_exists(user_auth: UserAPIKeyAuth, config: JWTConfig) -> N
         else:
             verbose_proxy_logger.warning(f"Failed to create/retrieve user {user_auth.user_id}")
             
+    except ImportError as e:
+        # Handle missing dependencies gracefully
+        verbose_proxy_logger.debug(f"Dependencies not available for user creation: {e}")
+        verbose_proxy_logger.debug("JWT authentication will continue without user creation")
     except Exception as e:
         # Don't fail authentication if user creation fails
         verbose_proxy_logger.warning(f"Failed to ensure user exists for {user_auth.user_id}: {e}")
         verbose_proxy_logger.debug("JWT authentication will continue without user creation")
+        # Log the full exception for debugging
+        import traceback
+        verbose_proxy_logger.debug(f"Full traceback: {traceback.format_exc()}")
 
 
 async def jwt_auth(request: Request, api_key: str) -> Optional[UserAPIKeyAuth]:
@@ -503,19 +537,23 @@ async def jwt_auth(request: Request, api_key: str) -> Optional[UserAPIKeyAuth]:
     
     # Check if the token looks like a JWT (has 3 parts separated by dots)
     if not api_key or api_key.count('.') != 2:
-        verbose_proxy_logger.debug("Received non-JWT token in JWT auth handler, falling back to standard auth")
+        verbose_proxy_logger.debug(f"Received non-JWT token in JWT auth handler (length: {len(api_key) if api_key else 0}, dots: {api_key.count('.') if api_key else 0}), falling back to standard auth")
         # This is not a JWT token, return None to signal fallback to standard authentication
         # When custom auth returns None, LiteLLM continues with standard auth (master key, DB lookup, etc.)
         return None
     
     # Validate the JWT token
+    verbose_proxy_logger.debug(f"Validating JWT token with issuer: {config.issuer}, audience_mode: {config.audience_mode}")
     claims = await validate_jwt_token(api_key, config)
     
     # Map claims to UserAPIKeyAuth object
     user_auth = map_jwt_claims_to_user_auth(claims, config)
     
+    # Set the JWT token as the API key for spend tracking
+    user_auth.api_key = api_key
+    
     # Automatically create internal user if JWT authentication succeeds
     await _ensure_user_exists(user_auth, config)
     
-    verbose_proxy_logger.info(f"Successfully authenticated user {user_auth.user_id} via JWT")
+    verbose_proxy_logger.info(f"Successfully authenticated user {user_auth.user_id} via JWT with role {user_auth.user_role}")
     return user_auth

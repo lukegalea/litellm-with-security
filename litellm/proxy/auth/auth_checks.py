@@ -713,6 +713,15 @@ async def get_user_object(
                 new_user_params: Dict[str, Any] = {
                     "user_id": user_id,
                 }
+                
+                # Include user_email if provided (fix for JWT auth email persistence)
+                if user_email is not None:
+                    new_user_params["user_email"] = user_email
+                
+                # Include sso_user_id if provided
+                if sso_user_id is not None:
+                    new_user_params["sso_user_id"] = sso_user_id
+                
                 if litellm.default_internal_user_params is not None:
                     new_user_params.update(litellm.default_internal_user_params)
 
